@@ -17,7 +17,7 @@
     "websockets>=10.3",
     "zeroconf>=0.28.8"
   ],
-  "version": "1.0.62",
+  "version": "1.0.63",
   "zeroconf": [
     {
       "type": "_websocket._tcp.local.",

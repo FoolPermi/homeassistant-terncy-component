@@ -3,11 +3,12 @@
 import asyncio
 import ipaddress
 import logging
+import time
 from typing import ForwardRef
 
 from homeassistant.components import zeroconf as hasszeroconf
 from homeassistant.const import CONF_PORT
-from zeroconf import ServiceBrowser
+from zeroconf import ServiceBrowser, Zeroconf
 
 from .const import (
     CONF_DEVID,
@@ -52,6 +53,50 @@ def _parse_svc(dev_id, info):
     if CONF_NAME not in txt_records and "dn" in txt_records:
         txt_records[CONF_NAME] = txt_records["dn"]
     return txt_records
+
+
+def _browse_terncy_hubs_sync(timeout: float = 5.0) -> dict:
+    """Browse Terncy hubs with a dedicated Zeroconf instance.
+
+    This matches the discovery method that works inside Docker/OrbStack even
+    when Home Assistant's shared Zeroconf browser does not surface services.
+    """
+    found: dict = {}
+
+    class Listener:
+        def add_service(self, zc, type_, name):
+            if not name.startswith(TERNCY_HUB_ID_PREFIX):
+                return
+            info = zc.get_service_info(type_, name)
+            if info is None:
+                return
+            dev_id = _device_id_from_name(name, type_)
+            records = _parse_svc(dev_id, info)
+            if records.get(CONF_IP):
+                found[dev_id] = records
+                _LOGGER.debug("active scan found hub: %s %s", dev_id, records)
+
+        def remove_service(self, zc, type_, name):
+            return
+
+        def update_service(self, zc, type_, name):
+            self.add_service(zc, type_, name)
+
+    zc = Zeroconf()
+    browser = ServiceBrowser(zc, TERNCY_HUB_SVC_NAME, Listener())
+    try:
+        # Exit early once a hub is found, otherwise wait the full timeout.
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if found:
+                # Allow a brief window for additional hubs on the same network.
+                time.sleep(0.5)
+                break
+            time.sleep(0.2)
+    finally:
+        browser.cancel()
+        zc.close()
+    return found
 
 
 class TerncyZCListener:
@@ -127,6 +172,10 @@ class TerncyHubManager:
             if devid.startswith(TERNCY_HUB_ID_PREFIX) and hub.get(CONF_IP)
         }
 
+    def _merge_hubs(self, hubs: dict) -> None:
+        for devid, hub in hubs.items():
+            self.hubs[devid] = hub
+
     async def start_discovery(self):
         """Start terncy discovery engine."""
         if self._discovery_engine:
@@ -169,18 +218,29 @@ class TerncyHubManager:
 
         await self.hass.async_add_executor_job(_scan)
 
+    async def async_active_scan(self, timeout: float = 5.0) -> dict:
+        """Run a dedicated mDNS browse that works even if HA's browser is quiet."""
+        hubs = await self.hass.async_add_executor_job(_browse_terncy_hubs_sync, timeout)
+        self._merge_hubs(hubs)
+        _LOGGER.debug("active scan result: %s", hubs)
+        return self.available_hubs()
+
     async def async_wait_for_hubs(self, timeout: float = 8.0) -> dict:
-        """Wait until at least one hub is discovered or timeout elapses."""
+        """Wait for hubs via HA browser, then fall back to an active scan."""
         await self.start_discovery()
+
+        # Give the shared HA browser a short chance first.
+        shared_wait = min(2.0, timeout)
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout
-        while True:
+        deadline = loop.time() + shared_wait
+        while loop.time() < deadline:
             hubs = self.available_hubs()
             if hubs:
                 return hubs
-            if loop.time() >= deadline:
-                return self.available_hubs()
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.25)
+
+        remaining = max(1.0, timeout - shared_wait)
+        return await self.async_active_scan(remaining)
 
     async def stop_discovery(self):
         """Stop terncy discovery engine."""

@@ -148,8 +148,13 @@ class TerncyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             devices_name[devid] = _hub_label(hub)
 
         if not devices_name:
-            if configured_ids and _get_discovered_devices(mgr):
-                _LOGGER.debug("all discovered hubs already configured")
+            if configured_ids:
+                # Discovery may fail while the only hub is already set up.
+                _LOGGER.debug(
+                    "no new hubs to configure; existing entries=%s discovered=%s",
+                    configured_ids,
+                    _get_discovered_devices(mgr),
+                )
                 return self.async_abort(reason="already_configured")
             _LOGGER.debug("no hubs discovered, falling back to manual setup")
             return await self.async_step_manual()
