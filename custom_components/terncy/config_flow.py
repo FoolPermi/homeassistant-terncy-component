@@ -1,6 +1,5 @@
 """Config flow for Terncy integration."""
 
-import asyncio
 import logging
 import uuid
 from typing import Any
@@ -37,7 +36,7 @@ else:
 _LOGGER = logging.getLogger(__name__)
 
 MANUAL_ENTRY = "manual"
-DISCOVERY_TIMEOUT = 3.0
+DISCOVERY_TIMEOUT = 8.0
 DEFAULT_PORT = 443
 
 
@@ -46,7 +45,7 @@ async def _start_discovery(mgr: TerncyHubManager) -> None:
 
 
 def _get_discovered_devices(mgr: TerncyHubManager | None) -> dict:
-    return {} if mgr is None else mgr.hubs
+    return {} if mgr is None else mgr.available_hubs()
 
 
 def _hub_label(hub: dict) -> str:
@@ -118,7 +117,10 @@ class TerncyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             if devid == MANUAL_ENTRY:
                 return await self.async_step_manual()
 
-            hub = _get_discovered_devices(mgr)[devid]
+            hub = _get_discovered_devices(mgr).get(devid) or mgr.hubs.get(devid)
+            if hub is None or not hub.get(CONF_IP):
+                return await self.async_step_manual()
+
             self.identifier = devid
             self.name = hub.get(CONF_NAME) or devid
             self.host = hub[CONF_IP]
@@ -132,14 +134,23 @@ class TerncyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
 
         if not self._discovery_waited:
             self._discovery_waited = True
-            await asyncio.sleep(DISCOVERY_TIMEOUT)
+            await mgr.async_wait_for_hubs(DISCOVERY_TIMEOUT)
 
+        configured_ids = {
+            entry.unique_id
+            for entry in self._async_current_entries()
+            if entry.unique_id
+        }
         devices_name: dict[str, str] = {}
         for devid, hub in _get_discovered_devices(mgr).items():
-            if hub.get(CONF_IP):
-                devices_name[devid] = _hub_label(hub)
+            if devid in configured_ids:
+                continue
+            devices_name[devid] = _hub_label(hub)
 
         if not devices_name:
+            if configured_ids and _get_discovered_devices(mgr):
+                _LOGGER.debug("all discovered hubs already configured")
+                return self.async_abort(reason="already_configured")
             _LOGGER.debug("no hubs discovered, falling back to manual setup")
             return await self.async_step_manual()
 
