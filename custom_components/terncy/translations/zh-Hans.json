@@ -1,4 +1,41 @@
 {
+  "config": {
+    "abort": {
+      "already_configured": "该家庭中心已经配置过了。"
+    },
+    "error": {
+      "invalid_auth": "请先在小燕 App 中批准访问请求",
+      "need_new_auth": "请重新申请授权，并在小燕 App 中批准后再提交",
+      "invalid_manual_input": "请填写有效的主机地址和家庭中心标识"
+    },
+    "flow_title": "小燕: {name}",
+    "step": {
+      "user": {
+        "description": "选择已发现的小燕家庭中心，或改用手动输入 IP。",
+        "data": {
+          "device": "设备"
+        }
+      },
+      "manual": {
+        "title": "手动设置",
+        "description": "填写家庭中心 IP。标识形如 `box-98-5d-ad-76-70-36`（可在小燕 App 或 mDNS 中查看）。",
+        "data": {
+          "host": "主机",
+          "port": "端口",
+          "identifier": "家庭中心标识",
+          "name": "名称"
+        }
+      },
+      "confirm": {
+        "description": "即将把 `{name}` 添加到 Home Assistant。\n\n**提交后请在小燕 App 中批准访问请求。**\n\n",
+        "title": "确认添加小燕家庭中心"
+      },
+      "begin_pairing": {
+        "description": "正在添加 `{name}`。\n\n**请在小燕 App 中批准访问请求，然后再次提交。**\n\n",
+        "title": "添加小燕家庭中心"
+      }
+    }
+  },
   "device_automation": {
     "trigger_type": {
       "long_press": "长按",

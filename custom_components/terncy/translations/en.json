@@ -5,13 +5,25 @@
     },
     "error": {
       "invalid_auth": "Please approve access request in Terncy app first",
-      "need_new_auth": "Request a new token, then approve access request in Terncy app first, then submit again"
+      "need_new_auth": "Request a new token, then approve access request in Terncy app first, then submit again",
+      "invalid_manual_input": "Please enter a valid host and hub identifier"
     },
     "flow_title": "Terncy: {name}",
     "step": {
       "user": {
+        "description": "Select a discovered Terncy Home Center, or choose manual IP setup.",
         "data": {
           "device": "Device"
+        }
+      },
+      "manual": {
+        "title": "Manual setup",
+        "description": "Enter the Home Center IP. Identifier looks like `box-98-5d-ad-76-70-36` (from Terncy app or mDNS).",
+        "data": {
+          "host": "Host",
+          "port": "Port",
+          "identifier": "Hub identifier",
+          "name": "Name"
         }
       },
       "confirm": {

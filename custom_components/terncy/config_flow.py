@@ -1,5 +1,6 @@
 """Config flow for Terncy integration."""
 
+import asyncio
 import logging
 import uuid
 from typing import Any
@@ -35,17 +36,36 @@ else:
 
 _LOGGER = logging.getLogger(__name__)
 
+MANUAL_ENTRY = "manual"
+DISCOVERY_TIMEOUT = 3.0
+DEFAULT_PORT = 443
 
-async def _start_discovery(mgr):
+
+async def _start_discovery(mgr: TerncyHubManager) -> None:
     await mgr.start_discovery()
 
 
-def _get_discovered_devices(mgr):
+def _get_discovered_devices(mgr: TerncyHubManager | None) -> dict:
     return {} if mgr is None else mgr.hubs
 
 
-def _get_terncy_instance(flow):
-    return flow.terncy
+def _hub_label(hub: dict) -> str:
+    name = hub.get(CONF_NAME) or hub.get(CONF_IP) or "Terncy Hub"
+    ip = hub.get(CONF_IP)
+    if ip:
+        return f"{name} ({ip})"
+    return name
+
+
+def _parse_identifier(service_name: str) -> str:
+    """Extract hub id from a zeroconf service name."""
+    identifier = service_name
+    suffix = "." + TERNCY_HUB_SVC_NAME
+    if identifier.endswith(suffix):
+        return identifier[: -len(suffix)]
+    if "._websocket._tcp" in identifier:
+        return identifier.split("._websocket._tcp")[0]
+    return identifier
 
 
 class TerncyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -54,16 +74,17 @@ class TerncyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     VERSION = 1
     CONNECTION_CLASS = config_entries.CONN_CLASS_LOCAL_PUSH
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Initialize the config flow."""
         self._discovered_devices = {}
+        self._discovery_waited = False
 
         self.username = "ha_user_" + uuid.uuid4().hex[0:5]
         self.client_id = "homeass_nbhQ43"
         self.identifier = ""
         self.name = ""
         self.host = ""
-        self.port = 443
+        self.port = DEFAULT_PORT
         self.token = ""
         self.token_id = 0
         self.context = {}
@@ -76,33 +97,99 @@ class TerncyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             "VALID_TOKEN_NOT_ACQUIRED",
         )
 
+    def _configure_terncy(self) -> None:
+        self.terncy = terncy.Terncy(
+            self.client_id,
+            self.identifier,
+            self.host,
+            self.port,
+            self.username,
+            "",
+        )
+
     async def async_step_user(self, user_input: dict[str, Any] | None = None):
         """Handle the initial step."""
         _LOGGER.debug("async_step_user: %s", user_input)
-        devices_name = {}
         mgr = TerncyHubManager.instance(self.hass)
+        await _start_discovery(mgr)
+
         if user_input is not None and CONF_DEVICE in user_input:
             devid = user_input[CONF_DEVICE]
+            if devid == MANUAL_ENTRY:
+                return await self.async_step_manual()
+
             hub = _get_discovered_devices(mgr)[devid]
             self.identifier = devid
-            self.name = hub[CONF_NAME]
+            self.name = hub.get(CONF_NAME) or devid
             self.host = hub[CONF_IP]
-            self.port = hub[CONF_PORT]
+            self.port = hub.get(CONF_PORT, DEFAULT_PORT)
             _LOGGER.debug("construct Terncy obj for %s %s", self.name, self.host)
-            self.terncy = terncy.Terncy(
-                self.client_id, self.identifier, self.host, self.port, self.username, ""
-            )
+            self._configure_terncy()
             return self.async_show_form(
                 step_id="begin_pairing",
                 description_placeholders={"name": self.name},
             )
 
+        if not self._discovery_waited:
+            self._discovery_waited = True
+            await asyncio.sleep(DISCOVERY_TIMEOUT)
+
+        devices_name: dict[str, str] = {}
         for devid, hub in _get_discovered_devices(mgr).items():
-            devices_name[devid] = hub[CONF_NAME]
+            if hub.get(CONF_IP):
+                devices_name[devid] = _hub_label(hub)
+
+        if not devices_name:
+            _LOGGER.debug("no hubs discovered, falling back to manual setup")
+            return await self.async_step_manual()
+
+        language = (self.hass.config.language or "").lower()
+        devices_name[MANUAL_ENTRY] = (
+            "手动输入 IP" if language.startswith("zh") else "Manual IP setup"
+        )
 
         return self.async_show_form(
             step_id="user",
             data_schema=vol.Schema({vol.Required(CONF_DEVICE): vol.In(devices_name)}),
+        )
+
+    async def async_step_manual(self, user_input: dict[str, Any] | None = None):
+        """Handle manual host configuration when discovery is empty or skipped."""
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            identifier = user_input["identifier"].strip()
+            host = user_input[CONF_HOST].strip()
+            port = int(user_input.get(CONF_PORT, DEFAULT_PORT))
+            name = (user_input.get("name") or identifier).strip()
+
+            if not identifier or not host:
+                errors["base"] = "invalid_manual_input"
+            else:
+                await self.async_set_unique_id(identifier)
+                self._abort_if_unique_id_configured(updates={CONF_HOST: host})
+
+                self.identifier = identifier
+                self.name = name
+                self.host = host
+                self.port = port
+                self._configure_terncy()
+                return self.async_show_form(
+                    step_id="begin_pairing",
+                    description_placeholders={"name": self.name},
+                )
+
+        return self.async_show_form(
+            step_id="manual",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_HOST): str,
+                    vol.Required(CONF_PORT, default=DEFAULT_PORT): int,
+                    vol.Required("identifier"): str,
+                    vol.Optional("name", default="Terncy Hub"): str,
+                }
+            ),
+            errors=errors,
         )
 
     async def async_step_begin_pairing(self, user_input=None):
@@ -111,27 +198,25 @@ class TerncyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         if self.unique_id is None:
             await self.async_set_unique_id(self.identifier)
             self._abort_if_unique_id_configured(updates={CONF_HOST: self.host})
-        ternobj = _get_terncy_instance(self)
+
         if self.token == "":
             _LOGGER.warning("request a new token form terncy %s", self.identifier)
-            code, token_id, token, state = await ternobj.request_token(
+            code, token_id, token, state = await self.terncy.request_token(
                 self.username, "HA User"
             )
             self.token = token
             self.token_id = token_id
             self.terncy.token = token
-        ternobj = _get_terncy_instance(self)
-        code, state = await ternobj.check_token_state(self.token_id, self.token)
+
+        code, state = await self.terncy.check_token_state(self.token_id, self.token)
         if code != 200:
             _LOGGER.warning("current token invalid, clear it")
             self.token = ""
             self.token_id = 0
-            errors = {}
-            errors["base"] = "need_new_auth"
             return self.async_show_form(
                 step_id="begin_pairing",
                 description_placeholders={"name": self.name},
-                errors=errors,
+                errors={"base": "need_new_auth"},
             )
         if state == terncy.TokenState.APPROVED.value:
             _LOGGER.warning("token valid, create entry for %s", self.identifier)
@@ -146,12 +231,10 @@ class TerncyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     "port": self.port,
                 },
             )
-        errors = {}
-        errors["base"] = "invalid_auth"
         return self.async_show_form(
             step_id="begin_pairing",
             description_placeholders={"name": self.name},
-            errors=errors,
+            errors={"base": "invalid_auth"},
         )
 
     async def async_step_confirm(self, user_input=None):
@@ -166,25 +249,29 @@ class TerncyConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     async def async_step_zeroconf(self, discovery_info: ZeroconfServiceInfo):
         """Prepare configuration for a discovered Terncy device."""
         _LOGGER.debug("async_step_zeroconf: %s", discovery_info)
-        identifier = discovery_info.name
-        identifier = identifier.replace("." + TERNCY_HUB_SVC_NAME, "")
+        identifier = _parse_identifier(discovery_info.name)
         await self.async_set_unique_id(identifier)
         self._abort_if_unique_id_configured(updates={CONF_HOST: discovery_info.host})
 
-        properties = discovery_info.properties
-        _LOGGER.debug(properties)
-        if not properties or CONF_NAME not in properties:
-            _LOGGER.warning("invalid discovery properties %s", DOMAIN)
-            return await self.async_step_confirm()
-        name = properties[CONF_NAME]
+        properties = discovery_info.properties or {}
+        _LOGGER.debug("zeroconf properties: %s", properties)
+
+        name = (
+            properties.get(CONF_NAME)
+            or properties.get("dn")
+            or properties.get("name")
+            or identifier
+        )
+
         self.context["identifier"] = self.unique_id
         self.context["title_placeholders"] = {"name": name}
         self.identifier = identifier
         self.name = name
         self.host = discovery_info.host
-        self.port = discovery_info.port
+        self.port = discovery_info.port or DEFAULT_PORT
         self.terncy.ip = self.host
         self.terncy.port = self.port
+
         mgr = TerncyHubManager.instance(self.hass)
         _LOGGER.debug("start discovery engine of domain %s", DOMAIN)
         await _start_discovery(mgr)
